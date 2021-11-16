@@ -10,6 +10,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             unsafe { uninit.assume_init() }
         })
         .collect();
+    let ys: Vec<_> = [MaybeUninit::<i16>::uninit(); 100]
+        .into_iter()
+        .map(|mut uninit| {
+            uninit.write(rand::random());
+            unsafe { uninit.assume_init() }
+        })
+        .collect();
 
     c.bench_function("min_max_multiple_passes", |b| {
         b.iter(|| min_max_multiple_passes(black_box(&xs)))
@@ -22,6 +29,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     });
     c.bench_function("min_max_bitwise_02", |b| {
         b.iter(|| min_max_bitwise_02(black_box(&xs)))
+    });
+    c.bench_function("min_max_simd_i16", |b| {
+        b.iter(|| unsafe { min_max_simd_i16(black_box(&ys)) })
     });
 }
 
