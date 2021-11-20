@@ -30,8 +30,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("min_max_bitwise_02", |b| {
         b.iter(|| min_max_bitwise_02(black_box(&xs)))
     });
-    c.bench_function("min_max_simd_i32", |b| {
-        b.iter(|| unsafe { min_max_simd_i32(black_box(&ys)) })
+    c.bench_function("min_max_simd_i32_direct", |b| {
+        b.iter(|| unsafe { min_max_simd_i32_direct(black_box(&ys)) })
+    });
+    c.bench_function("min_max_simd_i32_indirect", |b| {
+        b.iter(|| unsafe { min_max_simd_i32_indirect(black_box(&ys)) })
+    });
+    c.bench_function("min_max_portable_simd", |b| {
+        b.iter(|| unsafe { min_max_portable_simd(black_box(&ys)) })
     });
 }
 
