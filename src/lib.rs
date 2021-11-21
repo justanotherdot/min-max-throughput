@@ -234,6 +234,36 @@ pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
                 *slice.get_unchecked(3),
             );
 
+            // NOTE: Below is a every so slightly faster version using 256-bit vectors.
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
+            //let shuffled = _mm256_permutevar8x32_epi32(x, indices);
+            //let max1 = _mm256_max_epi32(shuffled, x);
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
+            //let shuffled = _mm256_permutevar8x32_epi32(max1, indices);
+            //let max2 = _mm256_max_epi32(shuffled, max1);
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
+            //let shuffled = _mm256_permutevar8x32_epi32(max2, indices);
+            //let max3 = _mm256_max_epi32(shuffled, max2);
+
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
+            //let shuffled = _mm256_permutevar8x32_epi32(x, indices);
+            //let min1 = _mm256_min_epi32(shuffled, x);
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
+            //let shuffled = _mm256_permutevar8x32_epi32(min1, indices);
+            //let min2 = _mm256_min_epi32(shuffled, min1);
+            //let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
+            //let shuffled = _mm256_permutevar8x32_epi32(min2, indices);
+            //let min3 = _mm256_min_epi32(shuffled, min2);
+
+            //let local_max = _mm256_extract_epi32(max3, 7);
+            //let local_min = _mm256_extract_epi32(min3, 7);
+            //if local_max > max {
+            //    max = local_max;
+            //}
+            //if local_min < min {
+            //    min = local_min;
+            //}
+
             let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(x);
             // NOTE: with avx2 support, purportedly better perf.
             //let shuffled = _mm_unpackhi_epi64(x, x);
