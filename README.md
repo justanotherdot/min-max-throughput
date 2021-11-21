@@ -22,9 +22,11 @@ $ cargo criterion
 ### Results
 
 ```
-min_max_multiple_passes time:   [794.29 ns 819.19 ns 846.59 ns]
-min_max_conditional     time:   [237.54 ns 245.33 ns 253.06 ns]
-min_max_bitwise_01      time:   [191.48 ns 193.62 ns 196.56 ns]
-min_max_bitwise_02      time:   [1.3146 us 1.3155 us 1.3165 us]
-min_max_simd_i32        time:   [698.01 ns 699.61 ns 701.57 ns]
+min_max_multiple_passes    time:   [620.82 ns 628.99 ns 638.34 ns]
+min_max_conditional        time:   [183.14 ns 184.40 ns 186.02 ns]
+min_max_bitwise_01         time:   [182.30 ns 182.84 ns 183.59 ns]
+min_max_bitwise_02         time:   [1.3158 us 1.3180 us 1.3208 us]
+min_max_simd_i32_direct    time:   [161.92 ns 162.14 ns 162.37 ns]
+min_max_simd_i32_indirect  time:   [418.78 ns 421.09 ns 424.25 ns]
+min_max_portable_simd      time:   [2.0696 us 2.0820 us 2.0965 us]
 ```

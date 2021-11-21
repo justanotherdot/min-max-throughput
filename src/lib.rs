@@ -1,3 +1,8 @@
+#![feature(portable_simd)]
+#![feature(stdarch)]
+
+use core::arch::x86_64::*;
+
 pub fn min_max_multiple_passes(integers: &[i64]) -> Option<(i64, i64)> {
     integers
         .iter()
@@ -15,13 +20,20 @@ pub fn min_max_conditional(integers: &[i64]) -> Option<(i64, i64)> {
     })
 }
 
+#[inline(always)]
+pub fn min_bitwise(x: i64, y: i64) -> i64 {
+    y ^ ((x ^ y) & -((x < y) as i64))
+}
+
+#[inline(always)]
+pub fn max_bitwise(x: i64, y: i64) -> i64 {
+    x ^ ((x ^ y) & -((x < y) as i64))
+}
+
 pub fn min_max_bitwise_01(integers: &[i64]) -> Option<(i64, i64)> {
     integers.into_iter().fold(None, |acc, x| match acc {
         None => Some((*x, *x)),
-        Some((min, max)) => Some((
-            min ^ ((*x ^ min) & -((*x < min) as i64)),
-            *x ^ ((*x ^ max) & -((*x < max) as i64)),
-        )),
+        Some((min, max)) => Some((min_bitwise(*x, min), max_bitwise(*x, max))),
     })
 }
 
@@ -37,83 +49,118 @@ pub fn min_max_bitwise_02(integers: &[i64]) -> Option<(i64, i64)> {
     })
 }
 
+// NOTE: This isn't really in a benchable state.
+// For it to get there, it needs to:
+//
+// * pass tests
+// * be an implementation that is not obviously problematic
 #[cfg(target_arch = "x86_64")]
-pub fn pp_sse2_register(x: core::arch::x86_64::__m128i) -> core::arch::x86_64::__m128i {
+pub unsafe fn min_max_portable_simd(buff: &[i32]) -> Option<(i32, i32)> {
+    if buff.is_empty() {
+        return None;
+    }
+    use std::simd::*;
+    let mut max = i32::MIN;
+    let lanes: Vec<_> = buff
+        .chunks(4)
+        .filter_map(|slice| {
+            if slice.len() == 4 {
+                Some(i32x4::from_array([
+                    *slice.get(0).unwrap_or(&0),
+                    *slice.get(0 + 1).unwrap_or(&0),
+                    *slice.get(0 + 2).unwrap_or(&0),
+                    *slice.get(0 + 3).unwrap_or(&0),
+                ]))
+            } else {
+                max = *slice.iter().max()?;
+                None
+            }
+        })
+        .collect();
+    if buff.len() % 4 == 0 {
+        let mut last_lane = lanes[0];
+        for lane in lanes {
+            let part = &(lane.lanes_lt(last_lane)).to_array();
+            let part = i32x4::from_array([
+                part[0] as i32,
+                part[1] as i32,
+                part[2] as i32,
+                part[3] as i32,
+            ]);
+            last_lane = lane ^ ((lane ^ last_lane) & -(part));
+            //last_lane = lane ^ ((lane ^ last_lane) & -(lane < last_lane));
+        }
+        // NOTE: Horizontal operaitons are slow in general.
+        //
+        // The proper way to do a reduction is a vertical, pairwise max on each invocation. This
+        // can be done on the same line, reducing with trash to one side, like the `indirect`
+        // approach in this module, or it can be direct, except in portable_simd I do not see a way
+        // to do pairwise max, only a way to ask if one lane is larger than the other, which I am
+        // not completely sure means what I expect, which is that the maximum value across all
+        // values in each lane is present in the lane returned.
+        max = last_lane.horizontal_max();
+    }
+    Some((0, max))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn pp(x: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
     unsafe {
-        dbg!(std::mem::transmute::<_, [i16; 8]>(x));
+        dbg!(std::mem::transmute::<_, [i32; 8]>(x));
     }
     x
 }
 
 #[cfg(target_arch = "x86_64")]
-pub unsafe fn min_max_simd_i32(buff: &[i32]) -> Option<(i32, i32)> {
-    // need to consider
-    // * excess padding on non multiples of 8, e.g. 9 elements
-    // * negative value
-    // * upgrading to i32 buffer, rather than i32
-    use core::arch::x86_64::*;
-    unsafe fn store_to_mm_256i(
-        x7: i32,
-        x6: i32,
-        x5: i32,
-        x4: i32,
-        x3: i32,
-        x2: i32,
-        x1: i32,
-        x0: i32,
-    ) -> __m256i {
-        _mm256_set_epi32(x0, x1, x2, x3, x4, x5, x6, x7)
-    }
-    let mut maxmax = _mm256_setzero_si256();
-    let mut minmin = _mm256_setzero_si256();
-    let mut max = *buff.get(0)?;
-    let mut min = *buff.get(0)?;
-    let f8: &[__m256i] = &(0..(buff.len() / 8) + 1)
-        .into_iter()
-        .map(|ix| {
-            store_to_mm_256i(
-                *buff.get(ix * 8).unwrap_or(&0),
-                *buff.get(ix * 8 + 1).unwrap_or(&0),
-                *buff.get(ix * 8 + 2).unwrap_or(&0),
-                *buff.get(ix * 8 + 3).unwrap_or(&0),
-                *buff.get(ix * 8 + 4).unwrap_or(&0),
-                *buff.get(ix * 8 + 5).unwrap_or(&0),
-                *buff.get(ix * 8 + 6).unwrap_or(&0),
-                *buff.get(ix * 8 + 7).unwrap_or(&0),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut maxval = _mm256_setzero_si256();
-    let mut minval = _mm256_setzero_si256();
-    for chunk in f8 {
-        maxval = _mm256_max_epi32(maxval, *chunk);
-        minval = _mm256_min_epi32(minval, *chunk);
-    }
-    // NOTE: if we go from i32 -> i64, we'll need to keep using __mm256_max_epi32.
-    // in which the case the below might matter.
-    // FIXME: I don't think the below actually does anything yet.
-    //let mut maxval2 = maxval;
-    //let mut minval2 = minval;
-    //for _ in 0..3 {
-    //    //pp(maxval);
-    //    //pp(_mm_shufflehi_epi32::<3>(maxval));
-    //    //pp(_mm_shufflehi_epi32::<8>(maxval));
+unsafe fn store_to_mm_256i(
+    x0: i32,
+    x1: i32,
+    x2: i32,
+    x3: i32,
+    x4: i32,
+    x5: i32,
+    x6: i32,
+    x7: i32,
+) -> __m256i {
+    _mm256_setr_epi32(x0, x1, x2, x3, x4, x5, x6, x7)
+}
 
-    //    maxval = _mm_max_epi32(maxval, _mm_shufflehi_epi32::<3>(maxval));
-    //    _mm_store_si256(&mut maxmax as *mut __m256i, maxval);
-    //    maxval2 = _mm_max_epi32(maxval2, _mm_shufflelo_epi32::<3>(maxval2));
-    //    _mm_store_si256(&mut maxmax as *mut __m256i, maxval2);
+#[cfg(target_arch = "x86_64")]
+unsafe fn splat(x0: i32) -> __m256i {
+    _mm256_set_epi32(x0, x0, x0, x0, x0, x0, x0, x0)
+}
 
-    //    minval = _mm_min_epi32(minval, _mm_shufflehi_epi32::<3>(minval));
-    //    _mm_store_si256(&mut minmin as *mut __m256i, minval);
-    //    minval2 = _mm_min_epi32(minval2, _mm_shufflelo_epi32::<3>(minval2));
-    //    _mm_store_si256(&mut minmin as *mut __m256i, minval2);
-    //}
-    _mm256_store_si256(&mut maxmax as *mut __m256i, maxval);
-    _mm256_store_si256(&mut minmin as *mut __m256i, minval);
-    let maxmax: [i32; 8] = std::mem::transmute(maxmax);
-    let minmin: [i32; 8] = std::mem::transmute(minmin);
-    // get_unchecked
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn min_max_simd_i32_direct(buff: &[i32]) -> Option<(i32, i32)> {
+    if buff.is_empty() {
+        return None;
+    }
+    let mut maxval = splat(i32::MIN);
+    let mut minval = splat(i32::MAX);
+    let mut max = i32::MIN;
+    let mut min = i32::MAX;
+    buff.chunks(8).into_iter().for_each(|slice| {
+        if slice.len() == 8 {
+            let chunk = store_to_mm_256i(
+                *slice.get_unchecked(0),
+                *slice.get_unchecked(1),
+                *slice.get_unchecked(2),
+                *slice.get_unchecked(3),
+                *slice.get_unchecked(4),
+                *slice.get_unchecked(5),
+                *slice.get_unchecked(6),
+                *slice.get_unchecked(7),
+            );
+            maxval = _mm256_max_epi32(maxval, chunk);
+            minval = _mm256_min_epi32(minval, chunk);
+        } else {
+            max = *slice.iter().max().unwrap();
+            min = *slice.iter().min().unwrap();
+        }
+    });
+    let maxmax: [i32; 8] = std::mem::transmute(maxval);
+    let minmin: [i32; 8] = std::mem::transmute(minval);
+    // TODO: try min_bitwise and max_bitwise below.
     for i in 0..8 {
         if max < *maxmax.get_unchecked(i) {
             max = *maxmax.get_unchecked(i);
@@ -123,6 +170,111 @@ pub unsafe fn min_max_simd_i32(buff: &[i32]) -> Option<(i32, i32)> {
         }
     }
     Some((min, max))
+}
+
+/// NOTE: This implements a more traditional aproach, although with 256-bit lanes.
+///
+/// 1. Take a single register
+/// 2. Shufflehi/shufflelo the elements rightwise
+/// 3. Calculate the pairwise reduction (min/max/sum/product/etc.)
+/// 4. Repeat at (1) until only a single element remains
+///
+/// Visualised:
+///
+/// (1.1) - initial
+/// ┌──────────────────┐
+/// │ 12 | 8 | -2 | 11 │ xmm0
+/// └──────────────────┘
+///
+/// (2.1) - shuffle
+/// ┌──────────────────┐
+/// │ XX | XX | 12 | 8 │ xmm1
+/// └──────────────────┘
+///
+/// (3.1) - max
+/// ┌──────────────────┐
+/// │ XX | X | 12 | 11 │ xmm2
+/// └──────────────────┘
+///
+/// (2.2) - shuffle
+/// ┌──────────────────┐
+/// │ XX | X | XX | 12 │ xmm1
+/// └──────────────────┘
+///
+/// (3.2) - max
+/// ┌──────────────────┐
+/// │ XX | X | XX | 12 │ xmm1
+/// └──────────────────┘
+///
+/// The point is we can consider the buildup to the left as trash and take advantage of the
+/// faster vertical instructions.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
+    if buff.is_empty() {
+        return None;
+    }
+    let mut min = i32::MAX;
+    let mut max = i32::MIN;
+    buff.chunks(8).into_iter().for_each(|slice| {
+        if slice.len() == 8 {
+            let x = store_to_mm_256i(
+                *slice.get_unchecked(0),
+                *slice.get_unchecked(1),
+                *slice.get_unchecked(2),
+                *slice.get_unchecked(3),
+                *slice.get_unchecked(4),
+                *slice.get_unchecked(5),
+                *slice.get_unchecked(6),
+                *slice.get_unchecked(7),
+            );
+
+            // TODO: try shift right instead of permutevar with control vector.
+            //let shuffled = _mm256_shuffle_epi32::<0b00_00_00_11>(x);
+            let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
+            let shuffled = _mm256_permutevar8x32_epi32(x, indices);
+            let max1 = _mm256_max_epi32(shuffled, x);
+            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
+            let shuffled = _mm256_permutevar8x32_epi32(max1, indices);
+            let max2 = _mm256_max_epi32(shuffled, max1);
+            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
+            let shuffled = _mm256_permutevar8x32_epi32(max2, indices);
+            let max3 = _mm256_max_epi32(shuffled, max2);
+
+            let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
+            let shuffled = _mm256_permutevar8x32_epi32(x, indices);
+            let min1 = _mm256_min_epi32(shuffled, x);
+            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
+            let shuffled = _mm256_permutevar8x32_epi32(min1, indices);
+            let min2 = _mm256_min_epi32(shuffled, min1);
+            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
+            let shuffled = _mm256_permutevar8x32_epi32(min2, indices);
+            let min3 = _mm256_min_epi32(shuffled, min2);
+
+            let local_max = _mm256_extract_epi32(max3, 7);
+            let local_min = _mm256_extract_epi32(min3, 7);
+            if local_max > max {
+                max = local_max;
+            }
+            if local_min < min {
+                min = local_min;
+            }
+        } else {
+            let local_max = *slice.iter().max().unwrap();
+            let local_min = *slice.iter().min().unwrap();
+            if local_max > max {
+                max = local_max;
+            }
+            if local_min < min {
+                min = local_min;
+            }
+        }
+    });
+    Some((min, max))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn min_max_simd_i32(buff: &[i32]) -> Option<(i32, i32)> {
+    min_max_simd_i32_direct(buff)
 }
 
 #[cfg(test)]
@@ -142,8 +294,7 @@ mod test {
         let mut rng = thread_rng();
         let mut result: Vec<_> = std::iter::repeat(0)
             .take(size)
-            .enumerate()
-            .map(|(i, _)| i as i32 + 1)
+            .map(|_| rng.gen_range(i32::MIN..i32::MAX))
             .collect();
         result.shuffle(&mut rng);
         result
@@ -174,30 +325,115 @@ mod test {
     }
 
     #[test]
-    fn min_max_simd_i32_work_with_exact_sized_arrays() {
+    fn min_max_simd_i32_direct_work_with_exact_sized_arrays() {
         unsafe {
             assert_eq!(min_max_simd_i32(&array_i32(0)), None);
-            assert_eq!(min_max_simd_i32(&array_i32(8)), Some((0, 8)));
-            assert_eq!(min_max_simd_i32(&array_i32(16)), Some((0, 16)));
-        }
-    }
-
-    #[test]
-    fn min_max_simd_i32_work_with_inexact_sized_arrays() {
-        unsafe {
-            assert_eq!(min_max_simd_i32(&array_i32(9)), Some((0, 9)));
-            assert_eq!(min_max_simd_i32(&array_i32(10)), Some((0, 10)));
-        }
-    }
-
-    #[test]
-    fn min_max_simd_i32_works() {
-        let mut rng = thread_rng();
-        for _ in 0..100 {
-            let size = rng.gen_range(0..i32::MAX);
-            unsafe {
-                assert_eq!(min_max_simd_i32(&array_i32(size as usize)), Some((0, size)));
+            for x in 1..3 {
+                let array = array_i32(x * 8);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_direct(&array), Some((min, max)));
             }
         }
     }
+
+    #[test]
+    fn min_max_simd_i32_direct_work_with_inexact_sized_arrays() {
+        unsafe {
+            for x in 9..11 {
+                let array = array_i32(x);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_direct(&array), Some((min, max)));
+            }
+        }
+    }
+
+    #[test]
+    fn min_max_simd_i32_direct_works() {
+        for size in 1..100 + 1 {
+            unsafe {
+                let array = array_i32(size);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_direct(&array), Some((min, max)));
+            }
+        }
+    }
+
+    #[test]
+    fn min_max_simd_i32_indirect_work_with_exact_sized_arrays() {
+        unsafe {
+            assert_eq!(min_max_simd_i32(&array_i32(0)), None);
+            for x in 1..3 {
+                let array = array_i32(x * 8);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_indirect(&array), Some((min, max)));
+            }
+        }
+    }
+
+    #[test]
+    fn min_max_simd_i32_indirect_work_with_inexact_sized_arrays() {
+        unsafe {
+            for x in 9..11 {
+                let array = array_i32(x);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_indirect(&array), Some((min, max)));
+            }
+        }
+    }
+
+    #[test]
+    fn min_max_simd_i32_indirect_works() {
+        for size in 1..100 + 1 {
+            unsafe {
+                let array = array_i32(size);
+                let min = *array.iter().min().unwrap();
+                let max = *array.iter().max().unwrap();
+                assert_eq!(min_max_simd_i32_indirect(&array), Some((min, max)));
+            }
+        }
+    }
+
+    //#[test]
+    //fn min_max_portable_simd_work_with_exact_sized_arrays() {
+    //    unsafe {
+    //        for x in 1..3 {
+    //            let array = array_i32(x * 8);
+    //            //let min = *array.iter().min().unwrap();
+    //            let max = *array.iter().max().unwrap();
+    //            // NOTE: This function is currently only returning 0 for min.
+    //            assert_eq!(min_max_portable_simd(&array), Some((0, max)));
+    //        }
+    //    }
+    //}
+
+    //#[test]
+    //fn min_max_portable_simd_work_with_inexact_sized_arrays() {
+    //    unsafe {
+    //        for x in 9..11 {
+    //            let array = array_i32(x);
+    //            //let min = *array.iter().min().unwrap();
+    //            let max = *array.iter().max().unwrap();
+    //            // NOTE: This function is currently only returning 0 for min.
+    //            assert_eq!(min_max_portable_simd(&array), Some((0, max)));
+    //        }
+    //    }
+    //}
+
+    //#[test]
+    //fn min_max_portable_simd_works() {
+    //    for size in 1..100 + 1 {
+    //        unsafe {
+    //            let array = array_i32(size);
+    //            //let min = *array.iter().min().unwrap();
+    //            let max = *array.iter().max().unwrap();
+    //            // NOTE: This function is currently only returning 0 for min.
+    //            assert_eq!(min_max_portable_simd(&array), Some((0, max)));
+    //        }
+    //    }
+    //}
 }
