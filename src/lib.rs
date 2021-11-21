@@ -104,7 +104,15 @@ pub unsafe fn min_max_portable_simd(buff: &[i32]) -> Option<(i32, i32)> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn pp(x: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+pub fn pp_128(x: core::arch::x86_64::__m128i) -> core::arch::x86_64::__m128i {
+    unsafe {
+        dbg!(std::mem::transmute::<_, [i32; 4]>(x));
+    }
+    x
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn pp_256(x: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
     unsafe {
         dbg!(std::mem::transmute::<_, [i32; 8]>(x));
     }
@@ -160,54 +168,56 @@ pub unsafe fn min_max_simd_i32_direct(buff: &[i32]) -> Option<(i32, i32)> {
     });
     let maxmax: [i32; 8] = std::mem::transmute(maxval);
     let minmin: [i32; 8] = std::mem::transmute(minval);
-    // TODO: try min_bitwise and max_bitwise below.
-    for i in 0..8 {
-        if max < *maxmax.get_unchecked(i) {
-            max = *maxmax.get_unchecked(i);
-        }
-        if min > *minmin.get_unchecked(i) {
-            min = *minmin.get_unchecked(i);
-        }
+    let local_max = *maxmax.iter().max().unwrap();
+    let local_min = *minmin.iter().min().unwrap();
+    if max < local_max {
+        max = local_max
+    }
+    if min > local_min {
+        min = local_min
     }
     Some((min, max))
 }
 
-/// NOTE: This implements a more traditional aproach, although with 256-bit lanes.
+/// NOTE: This implements a more traditional approach.
 ///
 /// 1. Take a single register
-/// 2. Shufflehi/shufflelo the elements rightwise
+/// 2. Shuffle the elements into place
 /// 3. Calculate the pairwise reduction (min/max/sum/product/etc.)
 /// 4. Repeat at (1) until only a single element remains
 ///
 /// Visualised:
 ///
+/// ```text
 /// (1.1) - initial
-/// ┌──────────────────┐
-/// │ 12 | 8 | -2 | 11 │ xmm0
-/// └──────────────────┘
+/// ┌───────────────────┐
+/// │ 12 |  8 | -2 | 11 │ xmm0
+/// └───────────────────┘
 ///
 /// (2.1) - shuffle
-/// ┌──────────────────┐
-/// │ XX | XX | 12 | 8 │ xmm1
-/// └──────────────────┘
+/// ┌───────────────────┐
+/// │ -2 | 11 | XX | XX │ xmm1
+/// └───────────────────┘
 ///
 /// (3.1) - max
-/// ┌──────────────────┐
-/// │ XX | X | 12 | 11 │ xmm2
-/// └──────────────────┘
+/// ┌───────────────────┐
+/// │ 12 | 11 | XX | XX │ xmm2
+/// └───────────────────┘
 ///
 /// (2.2) - shuffle
-/// ┌──────────────────┐
-/// │ XX | X | XX | 12 │ xmm1
-/// └──────────────────┘
+/// ┌───────────────────┐
+/// │ 11 | XX | XX | XX │ xmm1
+/// └───────────────────┘
 ///
 /// (3.2) - max
-/// ┌──────────────────┐
-/// │ XX | X | XX | 12 │ xmm1
-/// └──────────────────┘
+/// ┌───────────────────┐
+/// │ 12 | XX | XX | XX │ xmm1
+/// └───────────────────┘
+/// ```
 ///
 /// The point is we can consider the buildup to the left as trash and take advantage of the
-/// faster vertical instructions.
+/// faster vertical instructions, and then extract out the first element of the vector when
+/// we are done.
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
     if buff.is_empty() {
@@ -215,43 +225,31 @@ pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
     }
     let mut min = i32::MAX;
     let mut max = i32::MIN;
-    buff.chunks(8).into_iter().for_each(|slice| {
-        if slice.len() == 8 {
-            let x = store_to_mm_256i(
+    buff.chunks(4).into_iter().for_each(|slice| {
+        if slice.len() == 4 {
+            let x = _mm_set_epi32(
                 *slice.get_unchecked(0),
                 *slice.get_unchecked(1),
                 *slice.get_unchecked(2),
                 *slice.get_unchecked(3),
-                *slice.get_unchecked(4),
-                *slice.get_unchecked(5),
-                *slice.get_unchecked(6),
-                *slice.get_unchecked(7),
             );
 
-            // TODO: try shift right instead of permutevar with control vector.
-            //let shuffled = _mm256_shuffle_epi32::<0b00_00_00_11>(x);
-            let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
-            let shuffled = _mm256_permutevar8x32_epi32(x, indices);
-            let max1 = _mm256_max_epi32(shuffled, x);
-            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
-            let shuffled = _mm256_permutevar8x32_epi32(max1, indices);
-            let max2 = _mm256_max_epi32(shuffled, max1);
-            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
-            let shuffled = _mm256_permutevar8x32_epi32(max2, indices);
-            let max3 = _mm256_max_epi32(shuffled, max2);
+            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(x);
+            // NOTE: with avx2 support, purportedly better perf.
+            //let shuffled = _mm_unpackhi_epi64(x, x);
+            let max1 = _mm_max_epi32(shuffled, x);
+            let shuffled = _mm_shufflelo_epi16::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(max1);
+            let max2 = _mm_max_epi32(shuffled, max1);
+            let local_max = _mm_cvtsi128_si32(max2);
 
-            let indices = store_to_mm_256i(0, 0, 0, 0, 3, 2, 1, 0);
-            let shuffled = _mm256_permutevar8x32_epi32(x, indices);
-            let min1 = _mm256_min_epi32(shuffled, x);
-            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 5, 4);
-            let shuffled = _mm256_permutevar8x32_epi32(min1, indices);
-            let min2 = _mm256_min_epi32(shuffled, min1);
-            let indices = store_to_mm_256i(0, 0, 0, 0, 0, 0, 0, 6);
-            let shuffled = _mm256_permutevar8x32_epi32(min2, indices);
-            let min3 = _mm256_min_epi32(shuffled, min2);
+            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(x);
+            // NOTE: with avx2 support, purportedly better perf.
+            //let shuffled = _mm_unpackhi_epi64(x, x);
+            let min1 = _mm_min_epi32(shuffled, x);
+            let shuffled = _mm_shufflelo_epi16::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(min1);
+            let min2 = _mm_min_epi32(shuffled, min1);
+            let local_min = _mm_cvtsi128_si32(min2);
 
-            let local_max = _mm256_extract_epi32(max3, 7);
-            let local_min = _mm256_extract_epi32(min3, 7);
             if local_max > max {
                 max = local_max;
             }
