@@ -234,15 +234,19 @@ pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
                 *slice.get_unchecked(3),
             );
 
-            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(0, 0, 3, 2) }>(x);
+            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(x);
+            // NOTE: with avx2 support, purportedly better perf.
+            //let shuffled = _mm_unpackhi_epi64(x, x);
             let max1 = _mm_max_epi32(shuffled, x);
-            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(0, 0, 0, 1) }>(max1);
+            let shuffled = _mm_shufflelo_epi16::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(max1);
             let max2 = _mm_max_epi32(shuffled, max1);
             let local_max = _mm_cvtsi128_si32(max2);
 
-            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(0, 0, 3, 2) }>(x);
+            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(x);
+            // NOTE: with avx2 support, purportedly better perf.
+            //let shuffled = _mm_unpackhi_epi64(x, x);
             let min1 = _mm_min_epi32(shuffled, x);
-            let shuffled = _mm_shuffle_epi32::<{ _MM_SHUFFLE(0, 0, 0, 1) }>(min1);
+            let shuffled = _mm_shufflelo_epi16::<{ _MM_SHUFFLE(1, 0, 3, 2) }>(min1);
             let min2 = _mm_min_epi32(shuffled, min1);
             let local_min = _mm_cvtsi128_si32(min2);
 
