@@ -125,42 +125,34 @@ unsafe fn splat(x0: i32) -> __m256i {
 
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn min_max_simd_i32_direct(buff: &[i32]) -> Option<(i32, i32)> {
-    let mut maxmax = splat(i32::MIN);
-    let mut minmin = splat(i32::MAX);
-    let mut max = *buff.get(0)?;
-    let mut min = *buff.get(0)?;
-    let f8: &[__m256i] = &buff
-        .chunks(8)
-        .into_iter()
-        .filter_map(|slice| {
-            if slice.len() == 8 {
-                Some(store_to_mm_256i(
-                    *slice.get_unchecked(0),
-                    *slice.get_unchecked(1),
-                    *slice.get_unchecked(2),
-                    *slice.get_unchecked(3),
-                    *slice.get_unchecked(4),
-                    *slice.get_unchecked(5),
-                    *slice.get_unchecked(6),
-                    *slice.get_unchecked(7),
-                ))
-            } else {
-                max = *slice.iter().max()?;
-                min = *slice.iter().min()?;
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    if buff.is_empty() {
+        return None;
+    }
     let mut maxval = splat(i32::MIN);
     let mut minval = splat(i32::MAX);
-    for chunk in f8 {
-        maxval = _mm256_max_epi32(maxval, *chunk);
-        minval = _mm256_min_epi32(minval, *chunk);
-    }
-    _mm256_store_si256(&mut maxmax as *mut __m256i, maxval);
-    _mm256_store_si256(&mut minmin as *mut __m256i, minval);
-    let maxmax: [i32; 8] = std::mem::transmute(maxmax);
-    let minmin: [i32; 8] = std::mem::transmute(minmin);
+    let mut max = i32::MIN;
+    let mut min = i32::MAX;
+    buff.chunks(8).into_iter().for_each(|slice| {
+        if slice.len() == 8 {
+            let chunk = store_to_mm_256i(
+                *slice.get_unchecked(0),
+                *slice.get_unchecked(1),
+                *slice.get_unchecked(2),
+                *slice.get_unchecked(3),
+                *slice.get_unchecked(4),
+                *slice.get_unchecked(5),
+                *slice.get_unchecked(6),
+                *slice.get_unchecked(7),
+            );
+            maxval = _mm256_max_epi32(maxval, chunk);
+            minval = _mm256_min_epi32(minval, chunk);
+        } else {
+            max = *slice.iter().max().unwrap();
+            min = *slice.iter().min().unwrap();
+        }
+    });
+    let maxmax: [i32; 8] = std::mem::transmute(maxval);
+    let minmin: [i32; 8] = std::mem::transmute(minval);
     for i in 0..8 {
         if max < *maxmax.get_unchecked(i) {
             max = *maxmax.get_unchecked(i);
@@ -274,7 +266,7 @@ pub unsafe fn min_max_simd_i32_indirect(buff: &[i32]) -> Option<(i32, i32)> {
 
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn min_max_simd_i32(buff: &[i32]) -> Option<(i32, i32)> {
-    min_max_simd_i32_indirect(buff)
+    min_max_simd_i32_direct(buff)
 }
 
 #[cfg(test)]
